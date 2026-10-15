@@ -32,6 +32,8 @@ from typing import Any
 from _provenance import attach as attach_provenance
 from _provenance import collect as collect_provenance
 
+import _kv_paths
+
 _RUNTIME = None
 
 
@@ -951,7 +953,9 @@ if __name__ == "__main__":
         default=None,
         help="Apply mx.set_memory_limit during the run (e.g. 12800 for 16GB, 25600 for 32GB). Quality + memory validated in same process.",
     )
+    _kv_paths.add_argument(parser)
     args = parser.parse_args()
+    _kv_paths.reset()
 
     task_expert_cliques: dict[str, Any] | None = None
     if args.task_expert_cliques_file:
@@ -998,6 +1002,7 @@ if __name__ == "__main__":
         max_prompt_wall_s=max_prompt_wall_s,
     )
     attach_provenance(artifact, collect_provenance(args.model, args))
+    _kv_paths.attach(artifact, args.require_fused)
 
     if args.output_json:
         out = Path(args.output_json)
@@ -1005,6 +1010,7 @@ if __name__ == "__main__":
         with open(out, "w") as f:
             json.dump(artifact, f, indent=2)
         print(f"Wrote artifact: {out}")
+    _kv_paths.enforce(args.require_fused)
 
     if args.compare_baseline:
         baseline = load_baseline(Path(args.compare_baseline))

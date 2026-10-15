@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 
 import numpy as np
@@ -115,10 +116,98 @@ def get_stats() -> IsoQuantStats:
 
 def reset_stats() -> None:
     _GLOBAL_STATS.reset()
+    reset_path_report()
 
 
 def stats_summary() -> dict:
     return _GLOBAL_STATS.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Per-layer path record: which code path each IsoQuant layer actually ran.
+#
+#   deferred_fp16        attention over uncompressed prefill KV (no compression)
+#   fp16_fallback_cache  layer runs a plain KVCache (unsupported shape/codebook)
+#   fused_metal          decode attention via the packed Metal kernels
+#   fused_mlx            decode attention via the MLX-ops fallback (K/V materialised)
+#   unfused_dense        dense reconstruction of compressed K/V + SDPA
+#   fused_empty          fused_attention called on an empty cache (zeros returned)
+#   decode_write         compressed decode-time write
+#   encode_fused / encode_mlx   which encoder produced a decode-time write
+#
+# kv_path_report() also derives raw_passthrough = decode writes that were not
+# followed by a compressed read, i.e. the model attended over the returned
+# chunk only.
+# ---------------------------------------------------------------------------
+
+DECODE_READ_PATHS = ("fused_metal", "fused_mlx", "unfused_dense")
+NON_FUSED_PATHS = ("fused_mlx", "unfused_dense", "fp16_fallback_cache", "fused_empty")
+# Error sources that affect the attention path (encoder errors are reported only).
+ATTENTION_ERROR_SOURCES = ("fused_metal", "fallback_cache")
+_MAX_ERRORS_PER_LAYER = 3
+
+_PATH_COUNTS: dict[int, dict[str, int]] = {}
+_PATH_ERRORS: dict[int, list[str]] = {}
+
+
+def _layer_key(layer_idx) -> int:
+    return -1 if layer_idx is None else int(layer_idx)
+
+
+def _record_path(layer_idx, path: str, n: int = 1) -> None:
+    counts = _PATH_COUNTS.setdefault(_layer_key(layer_idx), {})
+    counts[path] = counts.get(path, 0) + n
+
+
+def _record_error(layer_idx, where: str, exc: BaseException | str) -> None:
+    errors = _PATH_ERRORS.setdefault(_layer_key(layer_idx), [])
+    detail = exc if isinstance(exc, str) else f"{type(exc).__name__}: {exc}"
+    msg = f"{where}: {detail}"[:300]
+    if msg not in errors and len(errors) < _MAX_ERRORS_PER_LAYER:
+        errors.append(msg)
+
+
+def reset_path_report() -> None:
+    _PATH_COUNTS.clear()
+    _PATH_ERRORS.clear()
+
+
+def kv_path_report() -> dict:
+    """Per-layer path counts and totals for all IsoQuant caches since last reset."""
+    layers = {}
+    totals: dict[str, int] = {}
+    for idx in sorted(set(_PATH_COUNTS) | set(_PATH_ERRORS)):
+        counts = dict(_PATH_COUNTS.get(idx, {}))
+        reads = sum(counts.get(p, 0) for p in DECODE_READ_PATHS)
+        writes = counts.get("decode_write", 0)
+        if writes > reads:
+            counts["raw_passthrough"] = writes - reads
+        layers[str(idx)] = {"counts": counts, "errors": list(_PATH_ERRORS.get(idx, []))}
+        for k, v in counts.items():
+            totals[k] = totals.get(k, 0) + v
+    return {"n_layers": len(layers), "totals": totals, "layers": layers}
+
+
+def fused_path_violations(report: dict) -> list[str]:
+    """Reasons a run did not use the fused Metal path for every decode read.
+
+    Decode-time encoder fallbacks (encode_mlx, fused_encode errors) are reported
+    in kv_path_report() but are not violations.
+    """
+    if not report.get("layers"):
+        return ["no IsoQuant layers recorded"]
+    problems = []
+    for idx, layer in report["layers"].items():
+        counts = layer["counts"]
+        bad = {p: counts[p] for p in NON_FUSED_PATHS + ("raw_passthrough",) if counts.get(p)}
+        if bad:
+            problems.append(f"layer {idx}: {bad}")
+        elif not counts.get("fused_metal"):
+            problems.append(f"layer {idx}: no fused_metal decode reads")
+        for err in layer["errors"]:
+            if err.split(":", 1)[0] in ATTENTION_ERROR_SOURCES:
+                problems.append(f"layer {idx}: {err}")
+    return problems
 
 
 def _get_metal_backend():
@@ -457,6 +546,14 @@ class IsoQuantKVCache(TurboQuantKVCache):
             except Exception:
                 self._activate_fallback_cache(self.num_heads, self.head_dim)
         self._resolve_fused_encode_gate()
+
+    def _activate_fallback_cache(self, n_kv_heads: int, head_dim: int) -> None:
+        exc = sys.exc_info()[1]  # set when called from an except block
+        reason = f"heads={n_kv_heads}, head_dim={head_dim}"
+        if exc is not None:
+            reason += f"; {type(exc).__name__}: {exc}"
+        _record_error(self.layer_idx, "fallback_cache", reason)
+        super()._activate_fallback_cache(n_kv_heads, head_dim)
 
     @classmethod
     def from_state(cls, state: dict, meta_state=None, **kwargs):
@@ -852,6 +949,7 @@ class IsoQuantKVCache(TurboQuantKVCache):
         self._ensure_runtime_shape(n_kv_heads, int(keys.shape[-1]))
         if self._fallback_cache is not None:
             _GLOBAL_STATS.fallback_invocations += 1
+            _record_path(self.layer_idx, "fp16_fallback_cache")
             out = self._fallback_cache.update_and_fetch(keys, values)
             self._sync_fallback_offset()
             return out
@@ -863,6 +961,7 @@ class IsoQuantKVCache(TurboQuantKVCache):
             # Prefill phase: accumulate FP16, no compression (zero error compounding).
             _GLOBAL_STATS.prefill_calls += 1
             _GLOBAL_STATS.prefill_tokens += seq_len
+            _record_path(self.layer_idx, "deferred_fp16")
             self._fp16_keys.append(k_batch)
             self._fp16_values.append(v_batch)
             self._seq_len += seq_len
@@ -872,6 +971,7 @@ class IsoQuantKVCache(TurboQuantKVCache):
         # Decode phase (post-finalize): compress incrementally.
         _GLOBAL_STATS.decode_calls += 1
         _GLOBAL_STATS.decode_tokens += seq_len
+        _record_path(self.layer_idx, "decode_write")
 
         new_packed_k = None
         new_packed_v = None
@@ -907,10 +1007,15 @@ class IsoQuantKVCache(TurboQuantKVCache):
                         new_compressed_vals["x_norm"],
                     )
                     self._fused_encode_verified = True
-            except Exception:
+            except Exception as e:
+                _record_error(self.layer_idx, "fused_encode", e)
                 self._use_fused_encode = False
                 new_packed_k = None
                 new_packed_v = None
+
+        _record_path(
+            self.layer_idx, "encode_fused" if new_packed_k is not None else "encode_mlx"
+        )
 
         if new_packed_k is None:
             new_compressed_keys = self._profile_mx_call(
@@ -1005,6 +1110,7 @@ class IsoQuantKVCache(TurboQuantKVCache):
         if self._deferred and self._fp16_keys:
             full = mx.concatenate(self._fp16_keys, axis=1)
             return full[None, ...].astype(self._dtype)
+        _record_path(self.layer_idx, "unfused_dense")
         if self._cache_mode == "prealloc":
             sliced = {
                 k: v[:, : self.offset, :] for k, v in self.compressed_keys.items()
@@ -1078,6 +1184,7 @@ class IsoQuantKVCache(TurboQuantKVCache):
             output: (B, num_heads, 1, head_dim) — attention output
         """
         if self.compressed_keys is None or self._seq_len == 0:
+            _record_path(self.layer_idx, "fused_empty")
             return mx.zeros_like(queries)
 
         if not self.supports_fused_attention:
@@ -1120,12 +1227,15 @@ class IsoQuantKVCache(TurboQuantKVCache):
                     q_rot, scale, mask, H_q, H_kv, T, D, repeats
                 )
                 self._fused_metal_ok = True
+                _record_path(self.layer_idx, "fused_metal")
                 return out[None, :, None, :].astype(queries.dtype)
-            except Exception:
+            except Exception as e:
                 _GLOBAL_STATS.fused_metal_failures += 1
+                _record_error(self.layer_idx, "fused_metal", e)
                 self._fused_metal_ok = False
 
         # --- MLX-ops fallback (centroid gather + dense matmul) ---
+        _record_path(self.layer_idx, "fused_mlx")
         out = self._fused_attention_mlx(q_rot, scale, mask, H_q, H_kv, T, D, repeats)
         return out[None, :, None, :].astype(queries.dtype)
 

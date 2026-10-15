@@ -22,6 +22,8 @@ import numpy as np
 from _provenance import attach as attach_provenance
 from _provenance import collect as collect_provenance
 
+import _kv_paths
+
 
 def _apply_chat_template(tokenizer, text):
     """Wrap text in chat template if the tokenizer supports it."""
@@ -149,7 +151,9 @@ def main():
     parser.add_argument("--output-json", type=str, default="")
     parser.add_argument("--expert-offload", action="store_true")
     parser.add_argument("--max-resident-experts", type=int, default=128)
+    _kv_paths.add_argument(parser)
     args = parser.parse_args()
+    _kv_paths.reset()
 
     from mlx_lm import load
 
@@ -266,7 +270,10 @@ def _run_single_depth(model, tokenizer, texts, args, provenance):
 
         results["backends"][kv_type] = backend_result
 
-    _write_results(attach_provenance(results, provenance), args.output_json)
+    attach_provenance(results, provenance)
+    _kv_paths.attach(results, args.require_fused)
+    _write_results(results, args.output_json)
+    _kv_paths.enforce(args.require_fused)
 
 
 def _run_multi_depth(model, tokenizer, texts, depth_list, args, provenance):
@@ -320,7 +327,10 @@ def _run_multi_depth(model, tokenizer, texts, depth_list, args, provenance):
                 deltas[depth_str] = round(data["ppl"] - ref["ppl"], 4)
         backend["delta_ppl_vs_default"] = deltas
 
-    _write_results(attach_provenance(results, provenance), args.output_json)
+    attach_provenance(results, provenance)
+    _kv_paths.attach(results, args.require_fused)
+    _write_results(results, args.output_json)
+    _kv_paths.enforce(args.require_fused)
 
 
 def _write_results(results, output_json):
