@@ -40,6 +40,8 @@ from typing import Any
 from _provenance import attach as attach_provenance
 from _provenance import collect as collect_provenance
 
+import _kv_paths
+
 _RUNTIME = None
 
 
@@ -531,7 +533,9 @@ def main():
         "--warm-repeat", action="store_true", help="Run a second pass with warm caches"
     )
     parser.add_argument("--output-json", type=str, default="")
+    _kv_paths.add_argument(parser)
     args = parser.parse_args()
+    _kv_paths.reset()
 
     result = run_profile(
         args.model,
@@ -544,6 +548,7 @@ def main():
         warm_repeat=args.warm_repeat,
     )
     attach_provenance(result, collect_provenance(args.model, args))
+    _kv_paths.attach(result, args.require_fused)
 
     if args.output_json:
         out = Path(args.output_json)
@@ -553,6 +558,7 @@ def main():
         print(f"\nWrote {out}")
     else:
         print(json.dumps(result, indent=2))
+    _kv_paths.enforce(args.require_fused)
 
 
 if __name__ == "__main__":

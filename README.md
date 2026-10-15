@@ -818,6 +818,23 @@ python scripts/_provenance.py check results/<file>.json
 
 Results JSON written by `measure_kv_fidelity.py`, `long_context_kv_eval.py`, `benchmark_moe_offload.py`, `eval_quality_gate.py`, `decode_profiler.py`, `run_2h_soak.py` and `run_stability_soak.py` include a `provenance` block: git SHA and dirty state, resolved model path / HF repo and revision, config hash and KV-relevant architecture fields, effective `ISOQUANT_*` / `TURBOQUANT_*` settings, package versions and host hardware. Paths under the home directory are written as `~/...`; hostname and user name are not recorded.
 
+The same scripts except `run_2h_soak.py` also write a `kv_paths` block: per-layer counts of the IsoQuant path each layer ran. The paths are:
+- `deferred_fp16`
+- `fused_metal`
+- `fused_mlx`
+- `unfused_dense`
+- `fp16_fallback_cache`
+- `fused_empty`
+- `raw_passthrough`
+- `encode_fused` / `encode_mlx`
+
+Each layer also records its first errors (e.g. why the Metal path or a codebook failed). With `--require-fused`, a run exits 1 after writing its JSON if any IsoQuant decode read used a path other than `fused_metal`, if a layer ran a plain FP16 cache, or if no IsoQuant layer ran. Encoder fallbacks are reported but not enforced.
+
+```bash
+pytest tests/test_kv_paths.py                        # no MLX required
+cd mlx-lm && pytest tests/test_isoquant_path_report.py
+```
+
 **What a PR must include:**
 - Quality gate pass (12/12) for any affected model pathway
 - Kernel precision validation pass (max error < 1e-05)
