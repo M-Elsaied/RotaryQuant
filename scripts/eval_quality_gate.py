@@ -29,6 +29,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from _provenance import attach as attach_provenance
+from _provenance import collect as collect_provenance
+
 _RUNTIME = None
 
 
@@ -994,6 +997,7 @@ if __name__ == "__main__":
         memory_limit_mb=args.memory_limit_mb,
         max_prompt_wall_s=max_prompt_wall_s,
     )
+    attach_provenance(artifact, collect_provenance(args.model, args))
 
     if args.output_json:
         out = Path(args.output_json)

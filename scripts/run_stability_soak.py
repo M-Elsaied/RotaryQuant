@@ -16,6 +16,8 @@ import time
 
 import mlx.core as mx
 import numpy as np
+from _provenance import attach as attach_provenance
+from _provenance import collect as collect_provenance
 from mlx_lm import generate, load
 
 
@@ -68,6 +70,7 @@ def main():
         model_config["max_resident_experts"] = args.max_resident_experts
 
     model, tokenizer = load(args.model, model_config=model_config)
+    provenance = collect_provenance(args.model, args)
 
     start = time.time()
     iteration = 0
@@ -115,7 +118,13 @@ def main():
         if iteration % 5 == 0:
             with open(f"{args.output_dir}/{model_tag}_soak_progress.json", "w") as f:
                 json.dump(
-                    {"model": args.model, "measurements": measurements}, f, indent=2
+                    {
+                        "model": args.model,
+                        "measurements": measurements,
+                        "provenance": provenance,
+                    },
+                    f,
+                    indent=2,
                 )
 
     tok_rates = [m["tok_per_s"] for m in measurements]
@@ -149,6 +158,7 @@ def main():
         "measurements": measurements,
     }
 
+    attach_provenance(artifact, provenance)
     out_path = f"{args.output_dir}/{model_tag}_soak_final.json"
     with open(out_path, "w") as f:
         json.dump(artifact, f, indent=2)

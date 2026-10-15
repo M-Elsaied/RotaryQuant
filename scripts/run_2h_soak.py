@@ -11,6 +11,8 @@ import time
 
 import mlx.core as mx
 import numpy as np
+from _provenance import attach as attach_provenance
+from _provenance import collect as collect_provenance
 from mlx_lm import generate, load
 
 MODEL = "gemma-4-26b-a4b-it-4bit"
@@ -19,8 +21,17 @@ OUT_DIR = "results/soak"
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
-model, tokenizer = load(
-    MODEL, model_config={"expert_offload": True, "max_resident_experts": 128}
+MODEL_CONFIG = {"expert_offload": True, "max_resident_experts": 128}
+model, tokenizer = load(MODEL, model_config=MODEL_CONFIG)
+provenance = collect_provenance(
+    MODEL,
+    {
+        "model": MODEL,
+        "duration_s": DURATION_S,
+        "kv_cache_type": "default",
+        "max_tokens": 500,
+        **MODEL_CONFIG,
+    },
 )
 
 prompts = [
@@ -79,7 +90,11 @@ while time.time() - start < DURATION_S:
     iteration += 1
     if iteration % 5 == 0:
         with open(f"{OUT_DIR}/gemma4_2h_soak_progress.json", "w") as f:
-            json.dump({"model": MODEL, "measurements": measurements}, f, indent=2)
+            json.dump(
+                {"model": MODEL, "measurements": measurements, "provenance": provenance},
+                f,
+                indent=2,
+            )
 
 tok_rates = [m["tok_per_s"] for m in measurements]
 artifact = {
@@ -100,6 +115,7 @@ artifact = {
     ),
     "measurements": measurements,
 }
+attach_provenance(artifact, provenance)
 with open(f"{OUT_DIR}/gemma4_2h_soak_final.json", "w") as f:
     json.dump(artifact, f, indent=2)
 print(

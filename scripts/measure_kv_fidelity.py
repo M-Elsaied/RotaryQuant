@@ -19,6 +19,8 @@ from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
+from _provenance import attach as attach_provenance
+from _provenance import collect as collect_provenance
 
 
 def _apply_chat_template(tokenizer, text):
@@ -159,6 +161,7 @@ def main():
         model_config["max_resident_experts"] = args.max_resident_experts
 
     model, tokenizer = load(args.model, model_config=model_config)
+    provenance = collect_provenance(args.model, args)
 
     # Test texts for PPL measurement — longer passages for stable estimation.
     # Three domains: technical prose, narrative, and code documentation.
@@ -206,12 +209,12 @@ def main():
         depth_list = [int(d.strip()) for d in args.depths.split(",") if d.strip()]
 
     if depth_list:
-        _run_multi_depth(model, tokenizer, texts, depth_list, args)
+        _run_multi_depth(model, tokenizer, texts, depth_list, args, provenance)
     else:
-        _run_single_depth(model, tokenizer, texts, args)
+        _run_single_depth(model, tokenizer, texts, args, provenance)
 
 
-def _run_single_depth(model, tokenizer, texts, args):
+def _run_single_depth(model, tokenizer, texts, args, provenance):
     """Original single-depth mode (backward compatible)."""
     results = {
         "schema_version": 2,
@@ -263,10 +266,10 @@ def _run_single_depth(model, tokenizer, texts, args):
 
         results["backends"][kv_type] = backend_result
 
-    _write_results(results, args.output_json)
+    _write_results(attach_provenance(results, provenance), args.output_json)
 
 
-def _run_multi_depth(model, tokenizer, texts, depth_list, args):
+def _run_multi_depth(model, tokenizer, texts, depth_list, args, provenance):
     """Multi-depth mode: measure PPL at each depth for each backend, compute deltas."""
     results = {
         "schema_version": 3,
@@ -317,7 +320,7 @@ def _run_multi_depth(model, tokenizer, texts, depth_list, args):
                 deltas[depth_str] = round(data["ppl"] - ref["ppl"], 4)
         backend["delta_ppl_vs_default"] = deltas
 
-    _write_results(results, args.output_json)
+    _write_results(attach_provenance(results, provenance), args.output_json)
 
 
 def _write_results(results, output_json):

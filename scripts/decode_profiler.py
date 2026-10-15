@@ -37,6 +37,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from _provenance import attach as attach_provenance
+from _provenance import collect as collect_provenance
+
 _RUNTIME = None
 
 
@@ -540,6 +543,7 @@ def main():
         max_resident_experts=args.max_resident_experts,
         warm_repeat=args.warm_repeat,
     )
+    attach_provenance(result, collect_provenance(args.model, args))
 
     if args.output_json:
         out = Path(args.output_json)
