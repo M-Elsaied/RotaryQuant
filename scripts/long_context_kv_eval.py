@@ -33,6 +33,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from _provenance import attach as attach_provenance
+from _provenance import collect as collect_provenance
+
 _RUNTIME = None
 
 
@@ -587,6 +590,7 @@ def main():
             use_predictor=args.use_predictor,
         ),
     )
+    provenance = collect_provenance(args.model, args)
 
     tests_to_run = list(TEST_RUNNERS.keys()) if args.test == "all" else [args.test]
 
@@ -625,6 +629,7 @@ def main():
     print(f"\n{'=' * 60}")
     print("All tests complete.")
 
+    attach_provenance(all_results, provenance)
     if args.output_json:
         out = Path(args.output_json)
         out.parent.mkdir(parents=True, exist_ok=True)

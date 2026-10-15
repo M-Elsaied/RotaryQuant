@@ -17,6 +17,9 @@ import sys
 import time
 from typing import Any
 
+from _provenance import attach as attach_provenance
+from _provenance import collect as collect_provenance
+
 _RUNTIME = None
 
 
@@ -497,6 +500,7 @@ def main() -> None:
                 "runs": runs_out,
             }
 
+        attach_provenance(metrics, collect_provenance(args.model, args))
         if args.json_output:
             with open(args.json_output, "w") as f:
                 json.dump(metrics, f, indent=2)

@@ -807,7 +807,16 @@ python scripts/validate_kernel_precision.py
 
 # Run a 2-hour soak test
 python scripts/run_2h_soak.py --model <model>
+
+# Provenance helper tests (no MLX required)
+pytest tests/test_provenance.py
+
+# Print the provenance a run would record / validate results files
+python scripts/_provenance.py show --model <model>
+python scripts/_provenance.py check results/<file>.json
 ```
+
+Results JSON written by `measure_kv_fidelity.py`, `long_context_kv_eval.py`, `benchmark_moe_offload.py`, `eval_quality_gate.py`, `decode_profiler.py`, `run_2h_soak.py` and `run_stability_soak.py` include a `provenance` block: git SHA and dirty state, resolved model path / HF repo and revision, config hash and KV-relevant architecture fields, effective `ISOQUANT_*` / `TURBOQUANT_*` settings, package versions and host hardware. Paths under the home directory are written as `~/...`; hostname and user name are not recorded.
 
 **What a PR must include:**
 - Quality gate pass (12/12) for any affected model pathway
