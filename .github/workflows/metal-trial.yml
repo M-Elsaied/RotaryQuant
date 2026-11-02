@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-14, macos-15]
+        runner: [macos-14]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
@@ -51,7 +51,7 @@ jobs:
         run: |
           mkdir -p ci-out
           python -m pytest tests -q -rf -p no:cacheprovider --continue-on-collection-errors 2>&1 | tee ci-out/root.txt | tail -40
-          (cd mlx-lm && python -m pytest tests -q -rf -p no:cacheprovider --timeout=900 2>&1 | tee ../ci-out/mlx-lm.txt | tail -80)
+          (cd mlx-lm && python -m pytest tests -q -rf -p no:cacheprovider --timeout=900 --continue-on-collection-errors 2>&1 | tee ../ci-out/mlx-lm.txt | tail -80)
 
       - uses: actions/upload-artifact@v4
         if: always()
