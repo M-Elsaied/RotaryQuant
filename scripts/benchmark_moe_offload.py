@@ -20,6 +20,8 @@ from typing import Any
 from _provenance import attach as attach_provenance
 from _provenance import collect as collect_provenance
 
+import _kv_paths
+
 _RUNTIME = None
 
 
@@ -433,7 +435,9 @@ def main() -> None:
         default=1,
         help="Run the full benchmark N times (reloads model each time); summary in JSON.",
     )
+    _kv_paths.add_argument(parser)
     args = parser.parse_args()
+    _kv_paths.reset()
     if args.turboquant_bits is not None:
         os.environ["TURBOQUANT_BITS"] = str(args.turboquant_bits)
     task_expert_cliques: dict[str, Any] | None = None
@@ -501,10 +505,12 @@ def main() -> None:
             }
 
         attach_provenance(metrics, collect_provenance(args.model, args))
+        _kv_paths.attach(metrics, args.require_fused)
         if args.json_output:
             with open(args.json_output, "w") as f:
                 json.dump(metrics, f, indent=2)
             print(f"Wrote metrics JSON: {args.json_output}")
+        _kv_paths.enforce(args.require_fused)
         if gate_failed:
             print(
                 "FAIL: benchmark exceeded one or more gates (--strict-gates).",

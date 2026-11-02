@@ -18,6 +18,8 @@ import mlx.core as mx
 import numpy as np
 from _provenance import attach as attach_provenance
 from _provenance import collect as collect_provenance
+
+import _kv_paths
 from mlx_lm import generate, load
 
 
@@ -52,7 +54,9 @@ def main():
     parser.add_argument("--kv-cache-type", type=str, default="default")
     parser.add_argument("--memory-limit-mb", type=float, default=None)
     parser.add_argument("--output-dir", type=str, default="results/soak")
+    _kv_paths.add_argument(parser)
     args = parser.parse_args()
+    _kv_paths.reset()
 
     os.makedirs(args.output_dir, exist_ok=True)
     duration_s = args.duration_mins * 60
@@ -159,6 +163,7 @@ def main():
     }
 
     attach_provenance(artifact, provenance)
+    _kv_paths.attach(artifact, args.require_fused)
     out_path = f"{args.output_dir}/{model_tag}_soak_final.json"
     with open(out_path, "w") as f:
         json.dump(artifact, f, indent=2)
@@ -170,6 +175,7 @@ def main():
     )
     print(f"RSS drift: {artifact['rss_drift_ratio']}x")
     print(f"Wrote {out_path}")
+    _kv_paths.enforce(args.require_fused)
 
 
 if __name__ == "__main__":

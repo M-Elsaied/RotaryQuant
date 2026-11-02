@@ -36,6 +36,8 @@ from typing import Any
 from _provenance import attach as attach_provenance
 from _provenance import collect as collect_provenance
 
+import _kv_paths
+
 _RUNTIME = None
 
 
@@ -571,7 +573,9 @@ def main():
     parser.add_argument("--system-prompt", type=str, default=None)
     parser.add_argument("--use-predictor", action="store_true")
     parser.add_argument("--output-json", type=str, default=None)
+    _kv_paths.add_argument(parser)
     args = parser.parse_args()
+    _kv_paths.reset()
 
     mx, _, load, _ = _runtime()
     mx.random.seed(args.seed)
@@ -630,12 +634,14 @@ def main():
     print("All tests complete.")
 
     attach_provenance(all_results, provenance)
+    _kv_paths.attach(all_results, args.require_fused)
     if args.output_json:
         out = Path(args.output_json)
         out.parent.mkdir(parents=True, exist_ok=True)
         with open(out, "w") as f:
             json.dump(all_results, f, indent=2)
         print(f"Artifact: {out}")
+    _kv_paths.enforce(args.require_fused)
 
 
 if __name__ == "__main__":
