@@ -27,7 +27,7 @@ jobs:
           python -m pip install -U pip
           pip install -e mlx-lm
           pip install -e .
-          pip install pytest pytest-timeout huggingface_hub
+          pip install pytest pytest-timeout huggingface_hub requests
 
       - name: Backend
         run: |
@@ -50,7 +50,7 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p ci-out
-          python -m pytest tests -q -rf -p no:cacheprovider 2>&1 | tee ci-out/root.txt | tail -40
+          python -m pytest tests -q -rf -p no:cacheprovider --continue-on-collection-errors 2>&1 | tee ci-out/root.txt | tail -40
           (cd mlx-lm && python -m pytest tests -q -rf -p no:cacheprovider --timeout=900 2>&1 | tee ../ci-out/mlx-lm.txt | tail -80)
 
       - uses: actions/upload-artifact@v4
