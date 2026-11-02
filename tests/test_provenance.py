@@ -133,6 +133,39 @@ def test_hf_cache_path_parsing(tmp_path):
     assert len(info["config_sha256"]) == 64
 
 
+def _fake_hf_cache(root: Path, repo: str, rev: str, files: dict) -> Path:
+    repo_dir = root / ("models--" + repo.replace("/", "--"))
+    snap = repo_dir / "snapshots" / rev
+    snap.mkdir(parents=True)
+    for name, content in files.items():
+        (snap / name).write_text(content)
+    (repo_dir / "refs").mkdir()
+    (repo_dir / "refs" / "main").write_text(rev)
+    return snap
+
+
+def test_hf_repo_id_resolves_from_partial_snapshot(tmp_path, monkeypatch):
+    # mlx_lm downloads a subset of repo files; the snapshot is "incomplete"
+    # from the hub's point of view but must still resolve.
+    snap = _fake_hf_cache(
+        tmp_path, "org/Partial-4bit", "abc123", {"config.json": json.dumps(GEMMA_LIKE)}
+    )
+    local, source = prov.resolve_model("org/Partial-4bit", cache_dir=tmp_path)
+    assert (local, source) == (snap, "hf_cache")
+
+    import huggingface_hub.constants as hf_constants
+
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(tmp_path))
+    info = prov.model_info("org/Partial-4bit")
+    assert info["source"] == "hf_cache"
+    assert (info["hf_repo_id"], info["hf_revision"]) == ("org/Partial-4bit", "abc123")
+
+
+def test_hf_repo_id_not_cached_raises(tmp_path):
+    with pytest.raises(prov.ProvenanceError, match="Hugging Face"):
+        prov.resolve_model("org/missing-model", cache_dir=tmp_path)
+
+
 def test_unresolvable_model_raises(tmp_path):
     with pytest.raises(prov.ProvenanceError):
         prov.model_info(str(tmp_path / "does-not-exist"))

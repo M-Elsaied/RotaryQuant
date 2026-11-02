@@ -180,22 +180,32 @@ def _parse_hf_cache_path(path: Path) -> tuple[str | None, str | None]:
     return None, None
 
 
-def resolve_model(model: str) -> tuple[Path, str]:
-    """Resolve a model argument to a local directory without downloading."""
+def resolve_model(model: str, cache_dir: str | Path | None = None) -> tuple[Path, str]:
+    """Resolve a model argument to a local directory without downloading.
+
+    A Hugging Face repo id resolves to the cached snapshot that holds its
+    config.json. mlx_lm downloads only selected files, so the snapshot is
+    not required to be complete.
+    """
     path = Path(model).expanduser()
     if path.is_dir():
         local, source = path.resolve(), "local"
     else:
         try:
-            from huggingface_hub import snapshot_download
+            from huggingface_hub import try_to_load_from_cache
 
-            local = Path(snapshot_download(model, local_files_only=True))
+            cached = try_to_load_from_cache(model, "config.json", cache_dir=cache_dir)
         except Exception as e:
             raise ProvenanceError(
-                f"model {model!r} is neither a local directory nor in the "
-                f"Hugging Face cache: {e}"
+                f"model {model!r} is neither a local directory nor a "
+                f"Hugging Face repo id: {e}"
             ) from e
-        source = "hf_cache"
+        if not isinstance(cached, str):  # None, or the cached-non-existence marker
+            raise ProvenanceError(
+                f"model {model!r} is neither a local directory nor in the "
+                "Hugging Face cache"
+            )
+        local, source = Path(cached).parent, "hf_cache"
     if not (local / "config.json").is_file():
         raise ProvenanceError(f"no config.json in {local}")
     return local, source
