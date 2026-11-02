@@ -5,6 +5,7 @@ rotation on the output produces identical results to the existing
 reconstruct_keys() + get_values() + scaled_dot_product_attention() path.
 """
 
+import os
 import unittest
 from unittest import mock
 
@@ -57,6 +58,7 @@ class TestFusedIsoQuantAttention(unittest.TestCase):
             self.skipTest("No codebook for head_dim=128, bit_width=3")
         self.assertTrue(cache.supports_fused_attention)
 
+    @unittest.skipUnless(mx.metal.is_available(), "Metal required")
     def test_fused_matches_dense_no_mask(self):
         """Core correctness: fused path == dense path without mask."""
         cache = _make_populated_cache(num_heads=4, seq_len=16, seed=100)
@@ -218,28 +220,35 @@ class TestFusedIsoQuantAttention(unittest.TestCase):
         )
 
     def test_packed_kv_cache_reused_and_invalidated(self):
-        """Packed 3-bit bytes should be cached across decode steps until KV changes."""
-        cache = _make_populated_cache(num_heads=2, seq_len=8, seed=1300)
-        if cache._fallback_cache is not None:
-            self.skipTest("No codebook")
-
+        """Packed 3-bit bytes are built once at finalize, reused across decode
+        steps, and extended (not rebuilt) when a decode token is appended."""
         rng = np.random.default_rng(1400)
         queries = mx.array(rng.normal(size=(1, 2, 1, 128)).astype(np.float32))
         scale = 128**-0.5
 
-        with mock.patch(
+        # The fused Metal encoder writes packed bytes directly and never calls
+        # pack_indices_3bit; pin the MLX encoder so the pack path is observable
+        # and the counts are the same with and without Metal.
+        with mock.patch.dict(os.environ, {"ISOQUANT_FUSED_ENCODE": "0"}), mock.patch(
             "mlx_lm.models.fused_kv_decode_kernels.pack_indices_3bit",
             wraps=__import__(
                 "mlx_lm.models.fused_kv_decode_kernels",
                 fromlist=["pack_indices_3bit"],
             ).pack_indices_3bit,
         ) as pack_mock:
-            # First call: pack keys and values once each.
+            # Prefill + finalize: keys and values are packed once each.
+            cache = _make_populated_cache(num_heads=2, seq_len=8, seed=1300)
+            if cache._fallback_cache is not None:
+                self.skipTest("No codebook")
+            self.assertEqual(
+                pack_mock.call_count,
+                2,
+                "finalize_deferred_prefill should pack keys and values exactly once",
+            )
+
+            # Attention on an unchanged cache reuses the packed bytes.
             out1 = cache.fused_attention(queries, scale=scale, mask=None)
             mx.eval(out1)
-            self.assertEqual(pack_mock.call_count, 2)
-
-            # Second call with unchanged cache: packed bytes should be reused.
             out2 = cache.fused_attention(queries, scale=scale, mask=None)
             mx.eval(out2)
             self.assertEqual(
@@ -248,19 +257,27 @@ class TestFusedIsoQuantAttention(unittest.TestCase):
                 "Packed 3-bit KV was recomputed despite unchanged cache state",
             )
 
-            # Mutate the cache with one decode token; this should invalidate.
+            # One decode token: only the appended token is packed (keys and
+            # values), and the packed caches are extended in place.
             new_keys = mx.array(rng.normal(size=(1, 2, 1, 128)).astype(np.float16))
             new_values = mx.array(rng.normal(size=(1, 2, 1, 128)).astype(np.float16))
             cache.update_and_fetch(new_keys, new_values)
+            self.assertEqual(
+                pack_mock.call_count,
+                4,
+                "A decode write should pack only the appended token's keys and values",
+            )
 
             out3 = cache.fused_attention(queries, scale=scale, mask=None)
             mx.eval(out3)
             self.assertEqual(
                 pack_mock.call_count,
                 4,
-                "Packed KV cache was not invalidated after KV update",
+                "fused_attention re-packed the cache after a decode write instead "
+                "of reusing the incrementally maintained packed KV",
             )
 
+    @unittest.skipUnless(mx.metal.is_available(), "Metal required")
     def test_metal_path_actually_executes(self):
         """Verify the Metal-fused path ran, not the silent MLX-ops fallback."""
         cache = _make_populated_cache(num_heads=2, seq_len=8, seed=1500)

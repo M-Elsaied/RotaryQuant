@@ -23,6 +23,8 @@ from mlx_lm.models.fused_kv_decode_kernels import pack_indices_3bit
 from mlx_lm.models.mlx_isoquant import IsoQuantKVCache
 from mlx_lm.models.mlx_turboquant import get_default_codebook_dir
 
+metal_only = pytest.mark.skipif(not mx.metal.is_available(), reason="Metal required")
+
 NUM_HEADS, HEAD_DIM = 2, 256
 CODEBOOK_DIR = get_default_codebook_dir()
 
@@ -176,6 +178,7 @@ def test_buffer_extension_at_step_boundary():
     assert cache.offset == 128 + 256 + 1
 
 
+@metal_only
 def test_fused_attention_equivalence():
     """fused_attention produces same output in both modes."""
     from mlx_lm.models.mlx_isoquant import reset_stats, get_stats
@@ -281,6 +284,7 @@ def test_trim_invalidates_packed_cache():
     assert cap > cache.offset  # buffer has padding
 
 
+@metal_only
 def test_restore_then_fused_attention_and_decode(monkeypatch):
     """from_state restore followed by fused attention + continued decode.
 

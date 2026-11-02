@@ -54,6 +54,7 @@ def _python_compress_batch(x, block_matrices, centroids, boundaries, use_hadamar
     }
 
 
+@unittest.skipUnless(mx.metal.is_available(), "Metal required")
 class TestFusedKVCompressD256(unittest.TestCase):
     """Verify fused Metal kernel matches Python reference path for D=256."""
 
@@ -220,6 +221,7 @@ class TestFusedKVCompressD256(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(mx.metal.is_available(), "Metal required")
 class TestFusedKVCompressD128(unittest.TestCase):
     """Verify fused Metal kernel matches Python reference path for D=128."""
 

@@ -1,0 +1,104 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  # Method-related test modules under mlx-lm/tests. Metal-only cases skip
+  # without Metal; the rest of mlx-lm/tests is upstream and runs in full-suite.
+  SUBSET: >-
+    tests/test_mlx_isoquant.py
+    tests/test_isoquant_path_report.py
+    tests/test_deferred_prefill.py
+    tests/test_fused_isoquant_attention.py
+    tests/test_fused_kv_compress.py
+    tests/test_iso_incremental_pack.py
+    tests/test_fused_npt8.py
+    tests/test_fused_npt16.py
+    tests/test_fused_npt8_tiled.py
+    tests/test_rotorquant_kvcache.py
+    tests/test_nemotron_quantized_kv.py
+    tests/test_kimi_mla_isoquant_dkv.py
+    tests/test_kimi_linear.py
+    tests/test_dedekimi_observer.py
+  # Single-kernel variant tests: tracked in #44, excluded until resolved.
+  DESELECT: >-
+    --deselect tests/test_fused_isoquant_attention.py::TestFusedIsoQuantAttention::test_fully_fused_single_kernel_matches_dense
+    --deselect tests/test_fused_isoquant_attention.py::TestFusedIsoQuantAttention::test_fully_fused_single_dispatch_count
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install "mlx[cpu]"
+          pip install -e mlx-lm -e .
+          pip install pytest pytest-timeout huggingface_hub requests
+      - name: Backend
+        run: python -c "import mlx.core as mx, mlx_lm; print('mlx', mx.__version__, '| metal', mx.metal.is_available(), '|', mlx_lm.__file__)"
+      - name: Root tests
+        run: python -m pytest tests -q -rs
+      - name: mlx-lm subset
+        working-directory: mlx-lm
+        run: python -m pytest $SUBSET $DESELECT -q -rs
+
+  metal:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -e mlx-lm -e .
+          pip install pytest pytest-timeout huggingface_hub requests
+      - name: Backend
+        run: |
+          sysctl -n machdep.cpu.brand_string hw.memsize
+          python -c "import platform, mlx.core as mx, mlx_lm; print('mlx', mx.__version__, '| metal', mx.metal.is_available(), '|', mlx_lm.__file__, '|', platform.machine(), 'macOS', platform.mac_ver()[0])"
+      - name: Root tests
+        run: python -m pytest tests -q -rs
+      - name: mlx-lm subset
+        working-directory: mlx-lm
+        run: python -m pytest $SUBSET $DESELECT -q -rs
+      - name: Metal vs MLX-ops parity
+        run: python scripts/metal_vs_mlx_parity.py
+
+  full-suite:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -e mlx-lm -e .
+          pip install pytest pytest-timeout huggingface_hub requests
+      - name: Full suites (informational)
+        run: |
+          mkdir -p ci-out
+          python -m pytest tests -q -rf -p no:cacheprovider --continue-on-collection-errors 2>&1 | tee ci-out/root.txt | tail -40
+          (cd mlx-lm && python -m pytest tests -q -rf -p no:cacheprovider --timeout=900 --continue-on-collection-errors 2>&1 | tee ../ci-out/mlx-lm.txt | tail -80)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-macos-14
+          path: ci-out/

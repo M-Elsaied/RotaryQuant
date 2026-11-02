@@ -22,7 +22,10 @@ from conftest_npt16 import (
 )
 from mlx_lm.models.fused_kv_decode_npt16 import fused_attention_npt16
 
+metal_only = pytest.mark.skipif(not mx.metal.is_available(), reason="Metal required")
 
+
+@metal_only
 class TestNPT16MatchesReference:
     """NPT=16 kernel matches 3-kernel pipeline (no inverse rotation)."""
 
@@ -82,6 +85,7 @@ class TestNPT16MatchesReference:
         )
 
 
+@metal_only
 class TestNPT16WithMask:
     """NPT=16 kernel handles additive mask (pe_scores in MLA)."""
 
@@ -150,6 +154,7 @@ class TestNPT16WithMask:
         )
 
 
+@metal_only
 class TestNPT16InverseRotation:
     """NPT=16 kernel applies SO(4) inverse rotation correctly."""
 
@@ -216,6 +221,7 @@ class TestNPT16InverseRotation:
         )
 
 
+@metal_only
 class TestNPT16SequenceLengths:
     """NPT=16 handles various sequence lengths."""
 
@@ -248,6 +254,7 @@ class TestNPT16SequenceLengths:
         )
 
 
+@metal_only
 class TestNPT16StorageStride:
     """NPT=16 handles storage_stride (prealloc cache mode)."""
 
