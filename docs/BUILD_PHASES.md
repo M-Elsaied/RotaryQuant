@@ -23,6 +23,7 @@
 
 **Script notes:**
 - `measure_kv_fidelity.py` now supports `--depths` multi-depth mode and emits `delta_ppl_vs_default` per depth. Use `--seed 42` for canonical Phase 1 runs.
+- `measure_kv_fidelity.py` scores the trailing `--score-tokens` positions (default 128) through the decode path after prefilling and finalizing the prefix; `schema_version: 4` adds a `scoring` block and per-backend `compressed_path` verification. Earlier artifacts (schema 2/3) were produced by a single forward pass in which IsoQuant scored FP16 KV (deferred prefill) while TurboQuant scored its quantized cache.
 - `long_context_kv_eval.py` has `ppl_at_depth` test with offsets at 256/512/1K/2K/4K. Verify the script emits `delta_ppl_vs_default` per depth or add that field.
 - The harness exists, but **Phase 1 is still open until the JSON artifacts are pinned**. Do not describe the repo as already having canonical perplexity coverage just because the scripts exist.
 

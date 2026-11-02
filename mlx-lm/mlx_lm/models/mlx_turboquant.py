@@ -490,6 +490,8 @@ class TurboQuantKVCache:
             keys.shape
         )  # usually batch=1 in generation
         assert batch_size == 1, "TurboQuantKVCache currently assumes batch=1"
+        # Reconstructed K/V follow the model dtype rather than a fixed float16.
+        self._dtype = keys.dtype
         if self._fallback_cache is None:
             try:
                 self._reconfigure_runtime_shape(n_kv_heads, int(k_head_dim))
@@ -861,6 +863,9 @@ class RotorQuantKVCache(KVCache):
         self.is_deferred = False
         self.deferred_keys = None
         self.deferred_values = None
+        # Multi-token updates are held in FP16 until the first single-token
+        # step. Set False to quantize every update as it arrives.
+        self.defer_prefill = True
 
     def _compress_and_store(self, keys: mx.array, values: mx.array):
         B, n_kv_heads, seq_len, head_dim = keys.shape
@@ -904,8 +909,10 @@ class RotorQuantKVCache(KVCache):
 
     def update_and_fetch(self, keys: mx.array, values: mx.array):
         B, n_kv_heads, seq_len, head_dim = keys.shape
+        # Reconstructed K/V follow the model dtype rather than a fixed float16.
+        self._dtype = keys.dtype
 
-        if seq_len > 1:
+        if seq_len > 1 and self.defer_prefill:
             self.is_deferred = True
             if self.deferred_keys is None:
                 self.deferred_keys = keys

@@ -38,6 +38,10 @@ All notable changes to this project will be documented in this file.
 - 5-minute smoke test section in README
 - Deployment & stability section with risk gates
 - CHANGELOG.md
+- New tests: `tests/test_kv_scoring.py` (scoring bookkeeping and which cache
+  paths the scored positions read, on a tiny random model) and
+  `tests/test_compressed_vs_fp16_attention.py` (3-bit attention against FP16
+  attention on the same inputs, with documented error bounds).
 
 ### Removed
 - The single-dispatch `fully_fused_attention` kernel (`fused_kv_decode_kernels.py`),
@@ -48,6 +52,22 @@ All notable changes to this project will be documented in this file.
   unchanged: `fused_qk_dot`, softmax, `fused_value_accum`, inverse rotation.
 
 ### Changed
+- **KV fidelity scoring goes through the decode path** (`scripts/_kv_scoring.py`,
+  used by `measure_kv_fidelity.py` and `long_context_kv_eval.py`): the window is
+  prefilled, the caches are finalized, and the trailing `--score-tokens`
+  positions are scored one token at a time, so compressed backends are scored on
+  the compressed cache they read during generation. The earlier single forward
+  pass scored IsoQuant on FP16 KV (it holds multi-token updates in FP16 until
+  finalize) while TurboQuant was scored on its quantized cache, so the two were
+  not compared under the same cache state; it remains available as
+  `--scoring single_pass`. Results carry `schema_version: 4`, a `scoring` block,
+  per-backend `compressed_path` verification, and the run exits 1 when a
+  compressed backend did not read its compressed cache (`--allow-unverified`).
+- `IsoQuantKVCache.fused_attention` accepts multi-token queries (dense attention
+  over the dequantized cache, recorded as `unfused_dense`); a non-deferred cache
+  can take its first write without a prior finalize; reconstructed K/V follow
+  the model dtype instead of a fixed float16. `RotorQuantKVCache.defer_prefill`
+  switches prefill deferral off.
 - **Runtime defaults flipped (2026-05-05, §3.4 graduation)**:
   `ISOQUANT_CACHE_MODE` default `concat_append` → `prealloc`;
   `ISOQUANT_FUSED_ENCODE` default `0` → `1`. Every IsoQuant cache

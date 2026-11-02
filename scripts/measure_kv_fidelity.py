@@ -4,17 +4,28 @@ Compares default, turboquant, and isoquant KV cache backends on the same
 model and prompts. Produces a JSON artifact with PPL and final-logit
 agreement metrics.
 
+Scoring (see scripts/_kv_scoring.py): by default the window is split into a
+prefix and the trailing ``--score-tokens`` positions. The prefix is prefilled
+and the caches are finalized (bulk compression), then the trailing tokens are
+fed through the decode path one at a time and only those are scored, so the
+numbers reflect the compressed cache every backend reads during generation.
+``--scoring single_pass`` restores the older single forward pass, in which
+IsoQuant scores FP16 KV (deferred prefill) while TurboQuant scores its quantized
+cache; it is kept for comparison with earlier artifacts. Each compressed backend records whether its compressed cache was
+actually read; the run exits 1 otherwise unless ``--allow-unverified`` is set.
+
 Usage:
     python scripts/measure_kv_fidelity.py --model <path> --output-json results/kv_fidelity.json
 
-    # Multi-depth mode (Phase 1 canonical):
+    # Multi-depth mode:
     python scripts/measure_kv_fidelity.py --model <path> \\
-        --depths 512,2048 --seed 42 \\
+        --depths 512,2048 --score-tokens 128 --seed 42 \\
         --output-json results/qwen3_kv_ppl_depth.json
 """
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import mlx.core as mx
@@ -23,6 +34,7 @@ from _provenance import attach as attach_provenance
 from _provenance import collect as collect_provenance
 
 import _kv_paths
+import _kv_scoring
 
 
 def _apply_chat_template(tokenizer, text):
@@ -56,77 +68,72 @@ def _build_long_text(tokenizer, target_tokens):
     return text
 
 
-def measure_ppl(model, tokenizer, text, kv_cache_type="default", max_tokens=512):
-    """Measure perplexity on raw text (no chat template — PPL should be measured
-    on natural language continuation, not chat-formatted input)."""
-    from mlx_lm.models.cache import make_prompt_cache
-
+def _score_text(model, tokenizer, text, kv_cache_type, max_tokens, scoring):
     tokens = tokenizer.encode(text)
     if len(tokens) > max_tokens:
         tokens = tokens[:max_tokens]
-
-    prompt = mx.array(tokens)[None]  # (1, T)
-    cache = make_prompt_cache(model, kv_cache_type=kv_cache_type)
-
-    # Forward pass to get logits
-    logits = model(prompt, cache=cache)  # (1, T, vocab)
-    mx.eval(logits)
-
-    # Compute per-token cross-entropy
-    log_probs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-    # Shift: predict token[i+1] from position i
-    target = prompt[:, 1:]  # (1, T-1)
-    log_probs = log_probs[:, :-1, :]  # (1, T-1, vocab)
-
-    # Gather log probs for actual next tokens
-    target_log_probs = mx.take_along_axis(
-        log_probs, target[:, :, None], axis=-1
-    ).squeeze(-1)  # (1, T-1)
-    mx.eval(target_log_probs)
-
-    nll = -float(mx.mean(target_log_probs).item())
-    ppl = float(np.exp(nll))
-    return ppl, nll, len(tokens)
+    return _kv_scoring.score_tokens(
+        model,
+        tokens,
+        kv_cache_type,
+        mode=scoring["mode"],
+        score_tokens=scoring["score_tokens"],
+        chunk=scoring["chunk"],
+        defer_prefill=scoring["defer_prefill"],
+    )
 
 
-def measure_logit_similarity(model, tokenizer, text, kv_cache_type, max_tokens=256):
-    """Measure final-logit agreement between default and compressed KV paths."""
-    from mlx_lm.models.cache import make_prompt_cache
+def measure_ppl(model, tokenizer, text, kv_cache_type="default", max_tokens=512, scoring=None):
+    """Perplexity of the scored positions of ``text`` (raw text, no chat template).
 
+    Returns the ``_kv_scoring.score_tokens`` result: ``ppl``, ``nll``, ``n_scored``,
+    ``prefix_tokens``, ``paths`` and the ``compressed_path`` verification.
+    """
+    scoring = scoring or _DEFAULT_SCORING
+    return _score_text(model, tokenizer, text, kv_cache_type, max_tokens, scoring)
+
+
+def measure_logit_similarity(model, tokenizer, text, kv_cache_type, max_tokens=256, scoring=None):
+    """Final-logit agreement between the default and a compressed KV path.
+
+    Both paths score the same tokens the same way (prefix, finalize, decode), and
+    the logits compared are those of the last scored step.
+    """
+    scoring = scoring or _DEFAULT_SCORING
     tokens = _apply_chat_template(tokenizer, text)
     if isinstance(tokens, str):
         tokens = tokenizer.encode(tokens)
     if len(tokens) > max_tokens:
         tokens = tokens[:max_tokens]
-    prompt = mx.array(tokens)[None]
+    kw = dict(
+        mode=scoring["mode"],
+        score_tokens=scoring["score_tokens"],
+        chunk=scoring["chunk"],
+        defer_prefill=scoring["defer_prefill"],
+    )
+    ref = _kv_scoring.score_tokens(model, tokens, "default", **kw)
+    cand = _kv_scoring.score_tokens(model, tokens, kv_cache_type, **kw)
 
-    # Default (reference)
-    cache_default = make_prompt_cache(model, kv_cache_type="default")
-    out_default = model(prompt, cache=cache_default)
-    mx.eval(out_default)
-
-    # Compressed
-    cache_compressed = make_prompt_cache(model, kv_cache_type=kv_cache_type)
-    out_compressed = model(prompt, cache=cache_compressed)
-    mx.eval(out_compressed)
-
-    # Cosine similarity of flattened final logits.
-    a = out_default.reshape(-1).astype(mx.float32)
-    b = out_compressed.reshape(-1).astype(mx.float32)
+    a = ref["final_logits"].reshape(-1).astype(mx.float32)
+    b = cand["final_logits"].reshape(-1).astype(mx.float32)
     cos_sim = float(
         (mx.sum(a * b) / (mx.linalg.norm(a) * mx.linalg.norm(b) + 1e-8)).item()
     )
 
-    # Top-k agreement
     k = 5
-    top_default = mx.argsort(out_default[0, -1])[-k:]
-    top_compressed = mx.argsort(out_compressed[0, -1])[-k:]
+    top_default = mx.argsort(ref["final_logits"])[-k:]
+    top_compressed = mx.argsort(cand["final_logits"])[-k:]
     mx.eval(top_default, top_compressed)
-    set_d = set(top_default.tolist())
-    set_c = set(top_compressed.tolist())
-    topk_agreement = len(set_d & set_c) / k
+    topk_agreement = len(set(top_default.tolist()) & set(top_compressed.tolist())) / k
+    return cos_sim, topk_agreement, cand["compressed_path"]
 
-    return cos_sim, topk_agreement
+
+_DEFAULT_SCORING = {
+    "mode": _kv_scoring.PREFIX_DECODE,
+    "score_tokens": 128,
+    "chunk": 1,
+    "defer_prefill": True,
+}
 
 
 def main():
@@ -152,6 +159,7 @@ def main():
     parser.add_argument("--expert-offload", action="store_true")
     parser.add_argument("--max-resident-experts", type=int, default=128)
     _kv_paths.add_argument(parser)
+    _kv_scoring.add_arguments(parser)
     args = parser.parse_args()
     _kv_paths.reset()
 
@@ -218,10 +226,52 @@ def main():
         _run_single_depth(model, tokenizer, texts, args, provenance)
 
 
+def _finish(results, args, provenance):
+    """Attach provenance and path report, write, then enforce the run's checks."""
+    attach_provenance(results, provenance)
+    _kv_paths.attach(results, args.require_fused)
+    _write_results(results, args.output_json)
+    _kv_paths.enforce(args.require_fused)
+    failed = results.get("unverified_backends", [])
+    if failed and not args.allow_unverified:
+        print(
+            "FAIL: compressed cache was not read for the scored positions: "
+            + ", ".join(failed)
+            + " (see backends.<name>.compressed_path.reasons; "
+            "--allow-unverified keeps the exit code 0)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _record_verification(results):
+    failed = []
+    for kv_type, backend in results["backends"].items():
+        checks = backend.get("compressed_path")
+        if checks and checks.get("checked") and not checks.get("ok"):
+            failed.append(kv_type)
+    results["unverified_backends"] = failed
+
+
+def _merge_checks(checks):
+    """Combine per-text verification dicts into one for the backend."""
+    checks = [c for c in checks if c]
+    if not checks:
+        return None
+    reasons = sorted({r for c in checks for r in c.get("reasons", [])})
+    return {
+        "checked": any(c.get("checked") for c in checks),
+        "ok": all(c.get("ok", False) for c in checks),
+        "reasons": reasons,
+    }
+
+
 def _run_single_depth(model, tokenizer, texts, args, provenance):
-    """Original single-depth mode (backward compatible)."""
+    """Single-depth mode."""
+    scoring = _kv_scoring.settings_from_args(args)
     results = {
-        "schema_version": 2,
+        "schema_version": 4,
+        "mode": "single_depth",
         "metric_note": (
             "cosine/top5 metrics below are computed on final logits versus the "
             "default KV path, not directly on attention scores or latent KV vectors"
@@ -229,35 +279,42 @@ def _run_single_depth(model, tokenizer, texts, args, provenance):
         "model": args.model,
         "max_tokens": args.max_tokens,
         "seed": args.seed,
+        "scoring": scoring,
         "backends": {},
     }
 
     for kv_type in ["default", "turboquant", "isoquant"]:
         print(f"\n=== {kv_type} ===")
         backend_result = {}
+        checks = []
 
-        # PPL
         ppls = []
+        per_text = []
         for i, text in enumerate(texts):
             try:
-                ppl, nll, n_tokens = measure_ppl(
-                    model, tokenizer, text, kv_type, args.max_tokens
+                r = measure_ppl(model, tokenizer, text, kv_type, args.max_tokens, scoring)
+                ppls.append(r["ppl"])
+                per_text.append(_kv_scoring.summarize(r))
+                checks.append(r["compressed_path"])
+                print(
+                    f"  Text {i}: PPL={r['ppl']:.2f} NLL={r['nll']:.4f} "
+                    f"({r['n_scored']} scored after a {r['prefix_tokens']}-token prefix; "
+                    f"compressed path {'ok' if r['compressed_path']['ok'] else 'NOT READ'})"
                 )
-                ppls.append(ppl)
-                print(f"  Text {i}: PPL={ppl:.2f} NLL={nll:.4f} ({n_tokens} tokens)")
             except Exception as e:
                 print(f"  Text {i}: PPL ERROR: {e}")
 
         if ppls:
             backend_result["mean_ppl"] = round(float(np.mean(ppls)), 2)
             backend_result["ppls"] = [round(p, 2) for p in ppls]
+            backend_result["texts"] = per_text
 
-        # Final-logit agreement (only for non-default)
         if kv_type != "default":
             try:
-                cos_sim, topk = measure_logit_similarity(
-                    model, tokenizer, texts[0], kv_type, args.max_tokens
+                cos_sim, topk, sim_checks = measure_logit_similarity(
+                    model, tokenizer, texts[0], kv_type, args.max_tokens, scoring
                 )
+                checks.append(sim_checks)
                 backend_result["logit_cosine_sim_vs_default"] = round(cos_sim, 6)
                 backend_result["logit_top5_agreement_vs_default"] = topk
                 # Backward-compatible aliases for older artifact readers.
@@ -268,55 +325,57 @@ def _run_single_depth(model, tokenizer, texts, args, provenance):
             except Exception as e:
                 print(f"  Logit agreement ERROR: {e}")
 
+        merged = _merge_checks(checks)
+        if merged is not None:
+            backend_result["compressed_path"] = merged
         results["backends"][kv_type] = backend_result
 
-    attach_provenance(results, provenance)
-    _kv_paths.attach(results, args.require_fused)
-    _write_results(results, args.output_json)
-    _kv_paths.enforce(args.require_fused)
+    _record_verification(results)
+    _finish(results, args, provenance)
 
 
 def _run_multi_depth(model, tokenizer, texts, depth_list, args, provenance):
-    """Multi-depth mode: measure PPL at each depth for each backend, compute deltas."""
+    """Multi-depth mode: PPL at each depth for each backend, with deltas."""
+    scoring = _kv_scoring.settings_from_args(args)
     results = {
-        "schema_version": 3,
+        "schema_version": 4,
         "mode": "multi_depth",
         "model": args.model,
         "seed": args.seed,
         "depths": depth_list,
+        "scoring": scoring,
         "backends": {},
     }
 
-    # Collect PPL per backend per depth
     for kv_type in ["default", "turboquant", "isoquant"]:
         print(f"\n=== {kv_type} ===")
         backend_result = {"by_depth": {}}
+        checks = []
 
         for depth in depth_list:
-            # Build or extend text to reach target depth
             text = " ".join(texts)
             if len(tokenizer.encode(text)) < depth:
                 text = _build_long_text(tokenizer, depth)
 
             try:
-                ppl, nll, n_tokens = measure_ppl(
-                    model, tokenizer, text, kv_type, max_tokens=depth
-                )
-                backend_result["by_depth"][str(depth)] = {
-                    "ppl": round(ppl, 4),
-                    "nll": round(nll, 6),
-                    "n_tokens": n_tokens,
-                }
+                r = measure_ppl(model, tokenizer, text, kv_type, depth, scoring)
+                entry = _kv_scoring.summarize(r)
+                checks.append(r["compressed_path"])
+                backend_result["by_depth"][str(depth)] = entry
                 print(
-                    f"  depth={depth}: PPL={ppl:.4f} NLL={nll:.6f} ({n_tokens} tokens)"
+                    f"  depth={depth}: PPL={r['ppl']:.4f} NLL={r['nll']:.6f} "
+                    f"({r['n_scored']} scored after a {r['prefix_tokens']}-token prefix; "
+                    f"compressed path {'ok' if r['compressed_path']['ok'] else 'NOT READ'})"
                 )
             except Exception as e:
                 backend_result["by_depth"][str(depth)] = {"error": str(e)}
                 print(f"  depth={depth}: ERROR: {e}")
 
+        merged = _merge_checks(checks)
+        if merged is not None:
+            backend_result["compressed_path"] = merged
         results["backends"][kv_type] = backend_result
 
-    # Compute delta_ppl_vs_default for compressed backends
     default_by_depth = results["backends"].get("default", {}).get("by_depth", {})
     for kv_type in ["turboquant", "isoquant"]:
         backend = results["backends"].get(kv_type, {})
@@ -327,10 +386,8 @@ def _run_multi_depth(model, tokenizer, texts, depth_list, args, provenance):
                 deltas[depth_str] = round(data["ppl"] - ref["ppl"], 4)
         backend["delta_ppl_vs_default"] = deltas
 
-    attach_provenance(results, provenance)
-    _kv_paths.attach(results, args.require_fused)
-    _write_results(results, args.output_json)
-    _kv_paths.enforce(args.require_fused)
+    _record_verification(results)
+    _finish(results, args, provenance)
 
 
 def _write_results(results, output_json):
