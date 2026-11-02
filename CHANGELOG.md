@@ -39,6 +39,14 @@ All notable changes to this project will be documented in this file.
 - Deployment & stability section with risk gates
 - CHANGELOG.md
 
+### Removed
+- The single-dispatch `fully_fused_attention` kernel (`fused_kv_decode_kernels.py`),
+  its dispatch branch in `IsoQuantKVCache._fused_attention_metal`, its two unit
+  tests, the `fused_attention_metal` benchmark variant and `scripts/sweep_threshold.py`.
+  The dispatcher never selected it (`_SINGLE_KERNEL_T_THRESHOLD = 0`) and its
+  reference test failed with a uniform 0.174x scale error. The decode path is
+  unchanged: `fused_qk_dot`, softmax, `fused_value_accum`, inverse rotation.
+
 ### Changed
 - **Runtime defaults flipped (2026-05-05, §3.4 graduation)**:
   `ISOQUANT_CACHE_MODE` default `concat_append` → `prealloc`;

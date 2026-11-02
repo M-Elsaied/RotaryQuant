@@ -3,7 +3,7 @@
 
 Benchmarks standard kernels (matmul, softmax, RoPE), novel IsoQuant kernels
 (structured rotation forward/inverse, KV compress), and fused attention
-pipelines (unfused, framework-compiled, hand-fused Metal) with rigorous
+pipelines (unfused, framework-compiled) with rigorous
 statistical methodology:
   - Adaptive iteration targeting CI < 2% median (max 500)
   - BCa bootstrap CIs via scipy.stats.bootstrap (10k samples)
@@ -660,120 +660,6 @@ def bench_fused_attention_compiled(H: int, T: int, D: int) -> BenchResult:
     return result
 
 
-def bench_fused_attention_metal(H: int, T: int, D: int) -> BenchResult | None:
-    """Variant 3: Hand-fused Metal kernel via fully_fused_attention().
-
-    Requires IsoQuant KV cache with compressed keys. Uses 3-bit quantization.
-    Returns None if the Metal kernel is unavailable.
-    """
-    try:
-        from mlx_lm.models.mlx_isoquant import (
-            IsoQuantKVCache,
-            build_isoquant_rotation_components,
-        )
-        from mlx_lm.models.fused_kv_decode_kernels import (
-            fully_fused_attention,
-            pack_indices_3bit,
-        )
-    except ImportError as e:
-        print(f"  [SKIP] fused_attention_metal: {e}")
-        return None
-
-    codebook_dir = _find_codebook_dir()
-    if codebook_dir is None:
-        print("  [SKIP] fused_attention_metal: no codebook directory found")
-        return None
-    cache = IsoQuantKVCache(
-        num_heads=H,
-        head_dim=D,
-        bit_width=3,
-        codebook_dir=codebook_dir,
-        seed=SEED,
-    )
-    if cache._fallback_cache is not None:
-        print("  [SKIP] fused_attention_metal: no codebook for this config")
-        return None
-
-    # Populate cache
-    rng = np.random.default_rng(SEED)
-    keys = mx.array(rng.normal(size=(1, H, T, D)).astype(np.float16))
-    values = mx.array(rng.normal(size=(1, H, T, D)).astype(np.float16))
-    cache.update_and_fetch(keys, values)
-    cache.finalize_deferred_prefill()
-
-    # Prepare query
-    q = mx.array(rng.normal(size=(1, H, 1, D)).astype(np.float32))
-    scale = 1.0 / math.sqrt(D)
-
-    # Pack indices for Metal
-    k_packed = pack_indices_3bit(cache.compressed_keys["indices"])
-    v_packed = pack_indices_3bit(cache.compressed_values["indices"])
-    k_norms = cache.compressed_keys["x_norm"][:, :, 0].astype(mx.float32)
-    v_norms = cache.compressed_values["x_norm"][:, :, 0].astype(mx.float32)
-    centroids = cache.compressor.centroids.reshape(-1).astype(mx.float32)
-    kv_head_map = mx.arange(H, dtype=mx.uint32)
-
-    # Rotate query forward
-    R_T = mx.swapaxes(cache.rotation_matrices, -2, -1)
-    q_flat = q[0, :, 0, :]  # (H, D)
-    q_rot = mx.squeeze(mx.matmul(q_flat[:, None, :], R_T), axis=1)
-
-    blocks_t = cache.block_matrices_t
-    use_hadamard = cache._use_hadamard
-
-    mx.eval(
-        k_packed, v_packed, k_norms, v_norms, centroids, kv_head_map, q_rot, blocks_t
-    )
-
-    # Test if kernel works
-    try:
-        test_out = fully_fused_attention(
-            K_packed=k_packed,
-            V_packed=v_packed,
-            centroids=centroids,
-            k_norms=k_norms,
-            v_norms=v_norms,
-            q_rot=q_rot,
-            kv_head_map=kv_head_map,
-            blocks_t=blocks_t,
-            scale=scale,
-            num_heads=H,
-            seq_len=T,
-            head_dim=D,
-            use_hadamard=use_hadamard,
-        )
-        mx.eval(test_out)
-    except Exception as e:
-        print(f"  [SKIP] fused_attention_metal kernel failed: {e}")
-        return None
-
-    def run():
-        out = fully_fused_attention(
-            K_packed=k_packed,
-            V_packed=v_packed,
-            centroids=centroids,
-            k_norms=k_norms,
-            v_norms=v_norms,
-            q_rot=q_rot,
-            kv_head_map=kv_head_map,
-            blocks_t=blocks_t,
-            scale=scale,
-            num_heads=H,
-            seq_len=T,
-            head_dim=D,
-            use_hadamard=use_hadamard,
-        )
-        mx.eval(out)
-
-    result = adaptive_bench(run)
-    result.name = "fused_attention_metal"
-    result.shape = f"{H}x{T}x{D}"
-    result.dtype = "float32"
-    flops = H * (2 * 1 * T * D + 2 * 1 * T * D)
-    result.tflops = flops / (result.median_us * 1e-6) / 1e12
-    return result
-
-
 # ---------------------------------------------------------------------------
 # Kernel registry and runner
 # ---------------------------------------------------------------------------
@@ -943,13 +829,6 @@ def run_fused_attention_suite() -> list[BenchResult]:
         print(f"      {r.median_us:.1f} us, CI={r.ci_width_pct:.2f}%")
         results.append(r)
 
-        print("    metal...")
-        r = bench_fused_attention_metal(H, T, D)
-        if r:
-            print(f"      {r.median_us:.1f} us, CI={r.ci_width_pct:.2f}%")
-            results.append(r)
-        else:
-            print("      SKIPPED")
 
     return results
 
