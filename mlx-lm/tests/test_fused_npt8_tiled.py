@@ -17,7 +17,10 @@ from conftest_npt8 import (
 from mlx_lm.models.fused_kv_decode_npt8 import fused_attention_npt8
 from mlx_lm.models.fused_kv_decode_npt8_tiled import fused_attention_npt8_tiled
 
+metal_only = pytest.mark.skipif(not mx.metal.is_available(), reason="Metal required")
 
+
+@metal_only
 def test_tiled_matches_v1_single_pass() -> None:
     t, h_kv, h_q, d = 512, 2, 16, 256
     k_p, v_p, c, nk, nv, q, kv_map = _synthetic_d256(t, h_kv, h_q)
@@ -62,6 +65,7 @@ def test_tiled_matches_v1_single_pass() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_tiled_matches_3kernel_reference() -> None:
     t, h_kv, h_q, d = 1024, 2, 16, 256
     k_p, v_p, c, nk, nv, q, kv_map = _synthetic_d256(t, h_kv, h_q)
@@ -90,6 +94,7 @@ def test_tiled_matches_3kernel_reference() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_tiled_with_partial_last_tile() -> None:
     t, h_kv, h_q, d = 300, 2, 16, 256
     k_p, v_p, c, nk, nv, q, kv_map = _synthetic_d256(t, h_kv, h_q)
@@ -134,6 +139,7 @@ def test_tiled_with_partial_last_tile() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_tiled_with_mask() -> None:
     t, h_kv, h_q, d = 512, 2, 16, 256
     k_p, v_p, c, nk, nv, q, kv_map = _synthetic_d256(t, h_kv, h_q)
@@ -165,6 +171,7 @@ def test_tiled_with_mask() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_tiled_with_storage_stride() -> None:
     t, h_kv, h_q, d = 512, 2, 16, 256
     k_p, v_p, c, nk, nv, q, kv_map = _synthetic_d256(t, h_kv, h_q)
@@ -203,6 +210,7 @@ def test_tiled_with_storage_stride() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_tiled_with_rotation() -> None:
     t, h_kv, h_q, d = 512, 2, 16, 256
     k_p, v_p, c, nk, nv, q, kv_map = _synthetic_d256(t, h_kv, h_q)
@@ -243,6 +251,7 @@ def test_tiled_with_rotation() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_tiled_with_hadamard() -> None:
     t, h_kv, h_q, d = 512, 2, 16, 256
     k_p, v_p, c, nk, nv, q, kv_map = _synthetic_d256(t, h_kv, h_q)
@@ -333,6 +342,7 @@ def test_npt8_tiled_cache_level_dispatch() -> None:
     )
 
 
+@metal_only
 def test_tiled_single_tile() -> None:
     """tile_size >= seq_len → num_tiles=1; merge-of-one should be identity."""
     t, h_kv, h_q, d = 64, 2, 16, 256
@@ -378,6 +388,7 @@ def test_tiled_single_tile() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_tiled_mha_no_gqa() -> None:
     """h_kv == h_q (MHA, no GQA) — mx.take expansion is identity."""
     t, h_kv, h_q, d = 512, 4, 4, 256
@@ -407,6 +418,7 @@ def test_tiled_mha_no_gqa() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_tiled_combined_mask_rotation_stride() -> None:
     """Mask + random SO(4) rotation + padded storage_stride — all at once."""
     t, h_kv, h_q, d = 512, 2, 16, 256

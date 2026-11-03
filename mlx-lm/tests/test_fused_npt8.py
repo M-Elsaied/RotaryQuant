@@ -29,7 +29,10 @@ from mlx_lm.models.fused_kv_decode_kernels import (
 )
 from mlx_lm.models.fused_kv_decode_npt8 import fused_attention_npt8
 
+metal_only = pytest.mark.skipif(not mx.metal.is_available(), reason="Metal required")
 
+
+@metal_only
 def test_fused_npt8_matches_stable_3kernel_no_inverse_rotation() -> None:
     t, h_kv, h_q, d = 256, 2, 16, 256
     k_p, v_p, c, nk, nv, q, kv_map = _synthetic_d256(t, h_kv, h_q)
@@ -56,6 +59,7 @@ def test_fused_npt8_matches_stable_3kernel_no_inverse_rotation() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_fused_npt8_also_matches_tiled_v_accum_path() -> None:
     from mlx_lm.models.fused_kv_decode_tiled import fused_value_accum_tiled
 
@@ -90,6 +94,7 @@ def test_fused_npt8_also_matches_tiled_v_accum_path() -> None:
     )
 
 
+@metal_only
 def test_fused_npt8_with_mask() -> None:
     """NPT=8 kernel handles attention mask correctly."""
 
@@ -122,6 +127,7 @@ def test_fused_npt8_with_mask() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_fused_npt8_with_storage_stride() -> None:
     """NPT=8 kernel works with padded buffers (storage_stride > seq_len)."""
 
@@ -161,6 +167,7 @@ def test_fused_npt8_with_storage_stride() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_fused_npt8_inverse_rotation_non_identity() -> None:
     """NPT=8 kernel applies inverse SO(4) rotation with random blocks."""
 
@@ -202,6 +209,7 @@ def test_fused_npt8_inverse_rotation_non_identity() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-3, atol=1e-4)
 
 
+@metal_only
 def test_fused_npt8_with_hadamard() -> None:
     """NPT=8 kernel applies inverse SO(4) + WHT (Hadamard) correctly."""
 
@@ -241,6 +249,7 @@ def test_fused_npt8_with_hadamard() -> None:
     np.testing.assert_allclose(np.asarray(ref), np.asarray(out), rtol=1e-2, atol=1e-3)
 
 
+@metal_only
 def test_npt8_cache_level_dispatch() -> None:
     """IsoQuantKVCache.fused_attention dispatches NPT=8 when ISOQUANT_USE_NPT8_FUSED=1 and D=256."""
     from unittest import mock
