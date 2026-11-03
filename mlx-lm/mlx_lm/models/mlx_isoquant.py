@@ -943,6 +943,8 @@ class IsoQuantKVCache(TurboQuantKVCache):
         """
         batch_size, n_kv_heads, seq_len, _ = keys.shape
         assert batch_size == 1, "IsoQuantKVCache currently assumes batch=1"
+        # Reconstructed K/V follow the model dtype rather than a fixed float16.
+        self._dtype = keys.dtype
         if offset is not None:
             self._seq_len = offset
             self.offset = offset
@@ -1029,7 +1031,7 @@ class IsoQuantKVCache(TurboQuantKVCache):
 
         from .fused_kv_decode_kernels import pack_indices_3bit
 
-        if self._cache_mode == "prealloc":
+        if self._cache_mode == "prealloc" and self.compressed_keys:
             self._ensure_buffer_capacity(seq_len)
             pos = self.offset
             end = pos + seq_len
@@ -1098,6 +1100,10 @@ class IsoQuantKVCache(TurboQuantKVCache):
                 self._packed_keys_cache,
                 self._packed_values_cache,
             )
+            if self._cache_mode == "prealloc":
+                # First write without a deferred prefill: the buffers were
+                # just seeded at exact size; add the usual headroom.
+                self._extend_buffers_by_step()
         self._seq_len += seq_len
         self.offset += seq_len
         return keys, values
@@ -1197,6 +1203,19 @@ class IsoQuantKVCache(TurboQuantKVCache):
                     stacklevel=2,
                 )
             _GLOBAL_STATS.unfused_fallback_calls += 1
+            keys = self.reconstruct_keys()
+            values = self.get_values()
+            from .base import scaled_dot_product_attention
+
+            return scaled_dot_product_attention(
+                queries, keys, values, cache=None, scale=scale, mask=mask
+            )
+
+        if queries.shape[2] != 1:
+            # Multi-token queries (chunked scoring, prompt extension after
+            # finalize): the fused kernels take one query per head, so attend
+            # densely over the dequantized cache instead. reconstruct_keys()
+            # records this as an "unfused_dense" read.
             keys = self.reconstruct_keys()
             values = self.get_values()
             from .base import scaled_dot_product_attention

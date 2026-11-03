@@ -122,33 +122,33 @@ def generate_response(
     return response.strip(), time.perf_counter() - t0
 
 
+_SCORE_TOKENS = 64
+
+
 def compute_nll_and_final_logits(
     model,
     token_ids: list[int],
     *,
     kv_cache_type: str,
-) -> tuple[float, float, Any]:
-    """Compute mean NLL, PPL, and final logits for a token prefix."""
-    mx, _, _, _ = _runtime()
-    from mlx_lm.models.cache import make_prompt_cache
+    score_tokens: int | None = None,
+) -> tuple[float, float, Any, dict[str, Any]]:
+    """Mean NLL, PPL, final logits and scoring details for a token prefix.
 
-    prompt = mx.array(token_ids)[None]
-    cache = make_prompt_cache(model, kv_cache_type=kv_cache_type)
-    logits = model(prompt, cache=cache)
-    mx.eval(logits)
+    The window is prefilled up to its last ``score_tokens`` positions, the caches
+    are finalized, and the trailing positions are scored one token at a time
+    through the decode path (see scripts/_kv_scoring.py).
+    """
+    _runtime()
+    import _kv_scoring
 
-    log_probs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-    target = prompt[:, 1:]
-    log_probs = log_probs[:, :-1, :]
-    target_log_probs = mx.take_along_axis(
-        log_probs, target[:, :, None], axis=-1
-    ).squeeze(-1)
-    mx.eval(target_log_probs)
-
-    nll = -float(mx.mean(target_log_probs).item())
-    ppl = float(math.exp(nll))
-    final_logits = logits[0, -1].astype(mx.float32)
-    return nll, ppl, final_logits
+    r = _kv_scoring.score_tokens(
+        model,
+        token_ids,
+        kv_cache_type,
+        mode=_kv_scoring.PREFIX_DECODE,
+        score_tokens=_SCORE_TOKENS if score_tokens is None else score_tokens,
+    )
+    return r["nll"], r["ppl"], r["final_logits"], _kv_scoring.summarize(r)
 
 
 def compare_final_logits(default_logits, candidate_logits) -> tuple[float, float]:
@@ -383,17 +383,22 @@ def run_ppl_at_depth_test(
         prefix_tokens = tokens[:window_end]
 
         t0 = time.perf_counter()
-        default_nll, default_ppl, default_logits = compute_nll_and_final_logits(
+        default_nll, default_ppl, default_logits, _ = compute_nll_and_final_logits(
             model, prefix_tokens, kv_cache_type="default"
         )
-        candidate_nll, candidate_ppl, candidate_logits = compute_nll_and_final_logits(
-            model, prefix_tokens, kv_cache_type=kv_cache_type
+        candidate_nll, candidate_ppl, candidate_logits, candidate_info = (
+            compute_nll_and_final_logits(
+                model, prefix_tokens, kv_cache_type=kv_cache_type
+            )
         )
         latency = time.perf_counter() - t0
         cos_sim, top5 = compare_final_logits(default_logits, candidate_logits)
 
         entry = {
             "context_tokens": window_end,
+            "scored_tokens": candidate_info["n_scored"],
+            "prefix_tokens": candidate_info["prefix_tokens"],
+            "candidate_compressed_path": candidate_info["compressed_path"],
             "default_nll": round(default_nll, 4),
             "default_ppl": round(default_ppl, 4),
             "candidate_nll": round(candidate_nll, 4),
@@ -567,6 +572,12 @@ def main():
     parser.add_argument("--expert-offload", action="store_true")
     parser.add_argument("--max-resident-experts", type=int, default=None)
     parser.add_argument("--max-tokens", type=int, default=200)
+    parser.add_argument(
+        "--score-tokens",
+        type=int,
+        default=64,
+        help="ppl_at_depth: trailing tokens of each window scored through the decode path",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temp", type=float, default=0.0)
     parser.add_argument("--kv-cache-type", type=str, default="default")
@@ -579,6 +590,8 @@ def main():
 
     mx, _, load, _ = _runtime()
     mx.random.seed(args.seed)
+    global _SCORE_TOKENS
+    _SCORE_TOKENS = args.score_tokens
 
     print(
         f"Loading model: {args.model}\n"

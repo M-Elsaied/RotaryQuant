@@ -820,6 +820,8 @@ python scripts/_provenance.py check results/<file>.json
 
 Results JSON written by `measure_kv_fidelity.py`, `long_context_kv_eval.py`, `benchmark_moe_offload.py`, `eval_quality_gate.py`, `decode_profiler.py`, `run_2h_soak.py` and `run_stability_soak.py` include a `provenance` block: git SHA and dirty state, resolved model path / HF repo and revision, config hash and KV-relevant architecture fields, effective `ISOQUANT_*` / `TURBOQUANT_*` settings, package versions and host hardware. Paths under the home directory are written as `~/...`; hostname and user name are not recorded.
 
+`measure_kv_fidelity.py` and `long_context_kv_eval.py` score through the decode path: the window is prefilled, the caches are finalized (bulk compression), and the trailing `--score-tokens` positions are fed one token at a time and scored, so compressed backends are measured on the cache they read during generation. `--scoring single_pass` restores the single forward pass, in which IsoQuant scores FP16 KV while TurboQuant scores its quantized cache. Each compressed backend records a `compressed_path` check in the results and the run exits 1 if the compressed cache was not read (`--allow-unverified` to override). `--score-chunk N` scores N tokens per forward call (dense attention over the dequantized cache); `--no-deferral` quantizes prefill updates as they arrive.
+
 The same scripts except `run_2h_soak.py` also write a `kv_paths` block: per-layer counts of the IsoQuant path each layer ran. The paths are:
 - `deferred_fp16`
 - `fused_metal`
