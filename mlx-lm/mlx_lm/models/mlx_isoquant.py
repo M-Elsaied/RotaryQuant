@@ -1241,12 +1241,6 @@ class IsoQuantKVCache(TurboQuantKVCache):
 
     # ----- Metal-fused path (Kernels A/C/D) -----
 
-    # Data-driven threshold (sweep_threshold.py, 100 iters, M4 Max, H=8 D=128):
-    # The 3-kernel path wins at all practical T because it parallelizes QK dot
-    # across T tokens with grid=(32*T, H).  The single kernel processes T serially
-    # in one 32-thread group, losing ~30-50% even at T=16.
-    # Disabled (threshold=0) until the single kernel gains T-parallel tiling.
-    _SINGLE_KERNEL_T_THRESHOLD = 0
     _NPT8_TILED_T_THRESHOLD = 512
 
     def _fused_attention_metal(
@@ -1386,22 +1380,6 @@ class IsoQuantKVCache(TurboQuantKVCache):
                 D,
                 storage_stride,
             )
-        elif T <= self._SINGLE_KERNEL_T_THRESHOLD:
-            out = self._fused_attention_single_kernel(
-                k_packed,
-                v_packed,
-                centroids,
-                k_norms,
-                v_norms,
-                q_rot,
-                kv_head_map,
-                scale,
-                mask,
-                H_q,
-                T,
-                D,
-                storage_stride,
-            )
         else:
             out = self._fused_attention_3kernel(
                 k_packed,
@@ -1427,46 +1405,6 @@ class IsoQuantKVCache(TurboQuantKVCache):
                 time.perf_counter() - total_t0
             ) * 1000.0
         return out
-
-    def _fused_attention_single_kernel(
-        self,
-        k_packed,
-        v_packed,
-        centroids,
-        k_norms,
-        v_norms,
-        q_rot,
-        kv_head_map,
-        scale,
-        mask,
-        H_q,
-        T,
-        D,
-        storage_stride,
-    ) -> mx.array:
-        """Single fully-fused kernel: QK + online softmax + V + inverse rotation."""
-        from .fused_kv_decode_kernels import fully_fused_attention
-
-        return self._profile_mx_call(
-            "fused_single_kernel_ms",
-            lambda: fully_fused_attention(
-                K_packed=k_packed,
-                V_packed=v_packed,
-                centroids=centroids,
-                k_norms=k_norms,
-                v_norms=v_norms,
-                q_rot=q_rot,
-                kv_head_map=kv_head_map,
-                blocks_t=self.block_matrices_t,
-                scale=scale,
-                num_heads=H_q,
-                seq_len=T,
-                head_dim=D,
-                use_hadamard=self._use_hadamard,
-                mask=mask,
-                storage_stride=storage_stride,
-            ),
-        )
 
     def _fused_attention_npt8(
         self,

@@ -4,8 +4,8 @@ Single-pass implementation: one threadgroup per query head, serial loop over
 the full sequence length T. NOT the T-tiled + FA2-merge design from the spec
 (``docs/superpowers/specs/2026-04-24-fused-npt8-tiled-design.md``).
 
-``fully_fused_attention`` in ``fused_kv_decode_kernels`` is restricted to
-``head_dim=128`` (NPT=4). This module provides a generalisation for
+The three-kernel pipeline in ``fused_kv_decode_kernels`` handles
+``head_dim=128`` (NPT=4). This module provides a single-pass variant for
 ``head_dim=256`` (NPT=8) using online softmax with in-kernel inverse
 SO(4) rotation and optional WHT.
 """

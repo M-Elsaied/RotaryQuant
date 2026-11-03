@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark: dense SDPA vs MLX-ops fused vs 3-kernel Metal vs single-kernel Metal.
+"""Benchmark: dense SDPA vs MLX-ops fused vs 3-kernel Metal.
 
 Measures per-call latency for each IsoQuant attention execution path
 so you can see whether the fused pipeline actually helps or whether
@@ -145,27 +145,8 @@ def bench_3kernel_metal(cache, queries, scale, warmup=5, iters=50):
     return elapsed / iters
 
 
-def bench_single_kernel_metal(cache, queries, scale, warmup=5, iters=50):
-    """Path 4: Single fully-fused kernel (QK + online softmax + V + inverse rot in 1 dispatch)."""
-    cache._fused_metal_ok = None
-
-    for _ in range(warmup):
-        out = cache.fused_attention(queries, scale=scale)
-        mx.eval(out)
-
-    if cache._fused_metal_ok is not True:
-        return None
-
-    t0 = time.perf_counter()
-    for _ in range(iters):
-        out = cache.fused_attention(queries, scale=scale)
-        mx.eval(out)
-    elapsed = time.perf_counter() - t0
-    return elapsed / iters
-
-
 def run_config(heads, seq, dim, iters, warmup):
-    """Run all 4 paths for a single configuration."""
+    """Run all 3 paths for a single configuration."""
     cache = _make_cache(heads, dim, seq)
     rng = np.random.default_rng(99)
     queries = mx.array(rng.normal(size=(1, heads, 1, dim)).astype(np.float32))
@@ -174,12 +155,11 @@ def run_config(heads, seq, dim, iters, warmup):
     t_dense = bench_dense_sdpa(cache, queries, scale, warmup, iters)
     t_mlx = bench_fused_mlx(cache, queries, scale, warmup, iters)
     t_3kernel = bench_3kernel_metal(cache, queries, scale, warmup, iters)
-    t_single = bench_single_kernel_metal(cache, queries, scale, warmup, iters)
 
-    return t_dense, t_mlx, t_3kernel, t_single
+    return t_dense, t_mlx, t_3kernel
 
 
-def print_results(label, t_dense, t_mlx, t_3kernel, t_single):
+def print_results(label, t_dense, t_mlx, t_3kernel):
     """Print results for one configuration."""
     print(f"  {label}")
     print(f"    Dense SDPA:           {t_dense * 1000:8.3f} ms/call")
@@ -192,14 +172,6 @@ def print_results(label, t_dense, t_mlx, t_3kernel, t_single):
         )
     else:
         print("    3-kernel Metal:       FAILED")
-    if t_single is not None:
-        print(
-            f"    Single-kernel Metal:  {t_single * 1000:8.3f} ms/call  ({t_dense / t_single:5.2f}x vs dense)"
-        )
-        if t_3kernel is not None:
-            print(f"    Single vs 3-kernel:   {t_3kernel / t_single:5.2f}x speedup")
-    else:
-        print("    Single-kernel Metal:  FAILED")
     print()
 
 
@@ -228,24 +200,16 @@ def main():
         print("=" * 72)
         print()
         for heads, seq, dim, label in configs:
-            t_dense, t_mlx, t_3k, t_single = run_config(
-                heads, seq, dim, args.iters, args.warmup
-            )
-            print_results(label, t_dense, t_mlx, t_3k, t_single)
+            t_dense, t_mlx, t_3k = run_config(heads, seq, dim, args.iters, args.warmup)
+            print_results(label, t_dense, t_mlx, t_3k)
     else:
         print(f"Config: H={args.heads}, T={args.seq}, D={args.dim}, iters={args.iters}")
         print()
 
-        t_dense, t_mlx, t_3k, t_single = run_config(
+        t_dense, t_mlx, t_3k = run_config(
             args.heads, args.seq, args.dim, args.iters, args.warmup
         )
-        print_results(
-            f"H={args.heads} T={args.seq} D={args.dim}",
-            t_dense,
-            t_mlx,
-            t_3k,
-            t_single,
-        )
+        print_results(f"H={args.heads} T={args.seq} D={args.dim}", t_dense, t_mlx, t_3k)
 
 
 if __name__ == "__main__":

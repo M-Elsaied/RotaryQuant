@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/M-Elsaied/RotaryQuant/actions/workflows/tests.yml/badge.svg)](https://github.com/M-Elsaied/RotaryQuant/actions/workflows/tests.yml)
 
-**This repository implements a new execution model for attention: run attention directly on compressed KV cache -- no reconstruction, no GEMM (matrix multiply), fully fused Metal kernels, with parallel Mojo kernel prototypes for portability.**
+**This repository implements a new execution model for attention: run attention directly on compressed KV cache -- no reconstruction, no GEMM (matrix multiply), a fused four-kernel Metal decode pipeline, with parallel Mojo kernel prototypes for portability.**
 
 **Podcast:** [Fitting a 120B Model on a MacBook — NotebookLM Breakdown](docs/Fitting_a_120B_model_on_a_MacBook.m4a) (download to listen)
 
@@ -80,7 +80,7 @@ This repo:
 
 **TurboQuant** works today but pays quadratic (d²) decode cost and reconstructs tensors.
 **RotorQuant** has better asymptotics but lacks production-grade fused kernels.
-**IsoQuant** is the first systems-realised version: O(d log d) decode, fully fused Metal implementation, running on real models today.
+**IsoQuant** is the first systems-realised version: O(d log d) decode, fused Metal implementation, running on real models today.
 
 ---
 
